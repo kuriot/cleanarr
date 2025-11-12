@@ -3,6 +3,7 @@ Cleanup service for matching Jellyfin watched content with Radarr/Sonarr
 """
 
 import re
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -118,8 +119,54 @@ class CleanupService:
         user_data = item.get("UserData", {})
         return user_data.get("IsFavorite", False)
 
+    def _parse_last_played(self, item: Dict[str, Any]) -> Optional[datetime]:
+        """Parse Jellyfin LastPlayedDate into a timezone-aware datetime"""
+        user_data = item.get("UserData") or {}
+        date_str = user_data.get("LastPlayedDate")
+        if not date_str:
+            return None
+
+        try:
+            trimmed = date_str.rstrip("Z")
+            if "." in trimmed:
+                main, fraction = trimmed.split(".", 1)
+            else:
+                main, fraction = trimmed, "0"
+
+            fraction = (fraction + "000000")[:6]
+            normalized = f"{main}.{fraction}"
+            parsed = datetime.strptime(normalized, "%Y-%m-%dT%H:%M:%S.%f")
+            return parsed.replace(tzinfo=timezone.utc)
+        except Exception:
+            logger.debug(f"Unable to parse LastPlayedDate: {date_str}")
+            return None
+
+    def _filter_by_watch_age(
+        self, items: List[Dict[str, Any]], min_age_days: int, label: str
+    ) -> List[Dict[str, Any]]:
+        """Keep only items watched at least min_age_days ago"""
+        cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
+        filtered: List[Dict[str, Any]] = []
+        skipped = 0
+
+        for item in items:
+            last_played = self._parse_last_played(item)
+            if last_played and last_played <= cutoff:
+                filtered.append(item)
+            else:
+                skipped += 1
+
+        if skipped:
+            logger.info(
+                f"⏳ Skipped {skipped} {label} newer than {min_age_days} days (or missing watch date)"
+            )
+
+        return filtered
+
     def get_cleanup_candidates(
-        self, min_watch_percentage: float = 0.8
+        self,
+        min_watch_percentage: float = 0.8,
+        min_watch_age_days: Optional[int] = None,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Get movies and series that are candidates for cleanup"""
         cleanup_movies = []
@@ -187,6 +234,16 @@ class CleanupService:
 
             unique_movies = non_favorite_movies
             unique_series = non_favorite_series
+
+            if min_watch_age_days is not None and min_watch_age_days >= 0:
+                unique_movies = list(unique_movies)
+                unique_series = list(unique_series)
+                unique_movies = self._filter_by_watch_age(
+                    unique_movies, min_watch_age_days, "movies"
+                )
+                unique_series = self._filter_by_watch_age(
+                    unique_series, min_watch_age_days, "series"
+                )
 
             # Match with Radarr movies
             if self.radarr:

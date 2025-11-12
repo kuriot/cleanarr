@@ -161,6 +161,7 @@ python run.py --similarity-threshold 0.9
 | `--keep-files` | Remove from *arr but keep files on disk | `false` |
 | `--movies-only` | Process only movies | `false` |
 | `--series-only` | Process only TV series | `false` |
+| `--watched-before-days` | Only delete items watched at least N days ago | `unset` |
 | `--similarity-threshold` | Minimum match confidence (0.0-1.0) | `0.8` |
 | `--log-level` | Logging verbosity (DEBUG/INFO/WARNING/ERROR) | `INFO` |
 

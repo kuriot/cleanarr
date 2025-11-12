@@ -134,6 +134,11 @@ def setup_cli() -> argparse.ArgumentParser:
         "--log-file",
         help="Custom log file path (default: ~/.config/cleanarr/cleanarr.log)",
     )
+    parser.add_argument(
+        "--watched-before-days",
+        type=int,
+        help="Only consider content watched at least this many days ago",
+    )
     return parser
 
 
@@ -260,7 +265,9 @@ def handle_cleanup(args) -> int:
         cleanup_service = CleanupService(jellyfin, radarr, sonarr, qbittorrent)
 
         logger.info("🔍 Finding cleanup candidates...")
-        movies, series = cleanup_service.get_cleanup_candidates()
+        movies, series = cleanup_service.get_cleanup_candidates(
+            min_watch_age_days=args.watched_before_days
+        )
 
         # Filter by similarity threshold
         movies = [
