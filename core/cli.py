@@ -125,6 +125,11 @@ def setup_cli() -> argparse.ArgumentParser:
         "--series-only", action="store_true", help="Only process TV series"
     )
     parser.add_argument(
+        "--delete-episodes",
+        action="store_true",
+        help="Delete watched episodes individually when possible",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
         default="INFO",
@@ -265,8 +270,13 @@ def handle_cleanup(args) -> int:
         cleanup_service = CleanupService(jellyfin, radarr, sonarr, qbittorrent)
 
         logger.info("🔍 Finding cleanup candidates...")
-        movies, series = cleanup_service.get_cleanup_candidates(
-            min_watch_age_days=args.watched_before_days
+        (
+            movies,
+            series,
+            episode_series,
+        ) = cleanup_service.get_cleanup_candidates(
+            min_watch_age_days=args.watched_before_days,
+            collect_episode_data=args.delete_episodes,
         )
 
         # Filter by similarity threshold
@@ -276,15 +286,32 @@ def handle_cleanup(args) -> int:
         series = [
             s for s in series if s["similarity_score"] >= args.similarity_threshold
         ]
+        if args.delete_episodes:
+            episode_series = [
+                s
+                for s in episode_series
+                if s["similarity_score"] >= args.similarity_threshold
+            ]
+        else:
+            episode_series = []
 
         # Safety filter: Skip content that exists in qBittorrent
         skipped_movies = 0
         skipped_series = 0
+        skipped_episode_series = 0
         if qbittorrent:
             original_movie_count = len(movies)
             original_series_count = len(series)
             movies = [m for m in movies if not m.get("in_qbittorrent", False)]
             series = [s for s in series if not s.get("in_qbittorrent", False)]
+            if episode_series:
+                original_episode_count = len(episode_series)
+                episode_series = [
+                    s for s in episode_series if not s.get("in_qbittorrent", False)
+                ]
+                skipped_episode_series = original_episode_count - len(episode_series)
+            else:
+                skipped_episode_series = 0
 
             skipped_movies = original_movie_count - len(movies)
             skipped_series = original_series_count - len(series)
@@ -292,19 +319,56 @@ def handle_cleanup(args) -> int:
                 logger.info(
                     f"🛡️ Safety filter: Skipped {skipped_movies} movies and {skipped_series} series found in qBittorrent"
                 )
+        skipped_episode_series_parent = 0
+        if episode_series and series:
+            deleting_series_ids = {
+                s.get("sonarr_item", {}).get("id")
+                for s in series
+                if s.get("sonarr_item")
+            }
+            original_episode_count = len(episode_series)
+            episode_series = [
+                entry
+                for entry in episode_series
+                if entry.get("sonarr_series", {}).get("id") not in deleting_series_ids
+            ]
+            skipped_episode_series_parent = (
+                original_episode_count - len(episode_series)
+            )
+        else:
+            skipped_episode_series_parent = 0
 
         print(f"\n📊 Cleanup Summary:")
         print(f"   Movies to delete: {len(movies)}")
         print(f"   Series to delete: {len(series)}")
+        if args.delete_episodes:
+            total_episode_files = sum(
+                len(entry.get("episodes", [])) for entry in episode_series
+            )
+            print(
+                f"   Episodes to delete individually: {total_episode_files} (across {len(episode_series)} series)"
+            )
         if qbittorrent and (skipped_movies > 0 or skipped_series > 0):
             print(
                 f"🛡️ Protected by qBittorrent: {skipped_movies} movies, {skipped_series} series"
             )
+            if args.delete_episodes and skipped_episode_series > 0:
+                print(
+                    f"🛡️ Episode cleanup skipped for {skipped_episode_series} series protected by qBittorrent"
+                )
+        if args.delete_episodes and skipped_episode_series_parent > 0:
+            print(
+                f"➡️ Episode cleanup skipped for {skipped_episode_series_parent} series already scheduled for deletion"
+            )
 
-        if not movies and not series:
+        if not movies and not series and not episode_series:
             if qbittorrent and (skipped_movies > 0 or skipped_series > 0):
                 print(
                     "  All watched content is protected by qBittorrent - nothing to delete!"
+                )
+            elif args.delete_episodes and skipped_episode_series > 0:
+                print(
+                    "  All watched episodes are protected by qBittorrent - nothing to delete!"
                 )
             else:
                 print("  No content to clean up!")
@@ -381,9 +445,11 @@ def handle_cleanup(args) -> int:
         results = cleanup_service.execute_cleanup(
             movies,
             series,
+            episode_series=episode_series,
             delete_files=delete_files,
             add_exclusion=args.add_exclusion,
             dry_run=dry_run,
+            delete_episodes=args.delete_episodes,
         )
 
         # Show results
@@ -392,6 +458,9 @@ def handle_cleanup(args) -> int:
         print(f"  Movies failed: {results['movies_failed']}")
         print(f"  Series deleted: {results['series_deleted']}")
         print(f"  Series failed: {results['series_failed']}")
+        if args.delete_episodes:
+            print(f"  Episodes deleted: {results['episodes_deleted']}")
+            print(f"  Episodes failed: {results['episodes_failed']}")
 
         if results["errors"]:
             print(f"\n❌ Errors:")

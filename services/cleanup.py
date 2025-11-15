@@ -163,14 +163,176 @@ class CleanupService:
 
         return filtered
 
+    def _collect_watched_episodes_for_series(
+        self,
+        users: List[Dict[str, Any]],
+        jellyfin_series: Dict[str, Any],
+        min_watch_age_days: Optional[int],
+    ) -> List[Dict[str, Any]]:
+        """Collect watched Jellyfin episodes for the provided series from all users"""
+        series_id = jellyfin_series.get("Id")
+        if not series_id:
+            return []
+
+        episodes_by_id: Dict[str, Dict[str, Any]] = {}
+        favorite_episodes = 0
+        favorite_season_numbers = set()
+
+        for user in users:
+            user_id = user["Id"]
+            try:
+                watched_episodes = self.jellyfin.get_watched_episodes_for_series(
+                    user_id, series_id
+                )
+                favorite_seasons = self.jellyfin.get_favorite_seasons_for_series(
+                    user_id, series_id
+                )
+            except Exception as exc:
+                logger.error(
+                    f"Error fetching watched episodes for {jellyfin_series.get('Name', 'Unknown')} (user {user_id}): {exc}"
+                )
+                continue
+
+            for season in favorite_seasons:
+                number = season.get("IndexNumber")
+                if number is not None:
+                    favorite_season_numbers.add(number)
+
+            for episode in watched_episodes:
+                season_number = episode.get("ParentIndexNumber")
+                if self._is_favorite(episode) or (
+                    season_number in favorite_season_numbers
+                ):
+                    favorite_episodes += 1
+                    continue
+                episodes_by_id[episode.get("Id")] = episode
+
+        if favorite_episodes:
+            logger.info(
+                f"🌟 Protected favorite episodes: {favorite_episodes} for {jellyfin_series.get('Name', 'Unknown')}"
+            )
+
+        episodes = list(episodes_by_id.values())
+        if (
+            min_watch_age_days is not None
+            and min_watch_age_days >= 0
+            and episodes
+        ):
+            episodes = self._filter_by_watch_age(
+                episodes,
+                min_watch_age_days,
+                f"episodes for {jellyfin_series.get('Name', 'Unknown')}",
+            )
+
+        return episodes
+
+    def _series_has_favorite_content(
+        self, users: List[Dict[str, Any]], jellyfin_series: Dict[str, Any]
+    ) -> bool:
+        """Determine if any user has favorited episodes or seasons in this series"""
+        series_id = jellyfin_series.get("Id")
+        if not series_id:
+            return False
+
+        for user in users:
+            user_id = user["Id"]
+            try:
+                favorites = self.jellyfin.get_favorite_episodes_for_series(
+                    user_id, series_id
+                )
+                seasons = self.jellyfin.get_favorite_seasons_for_series(
+                    user_id, series_id
+                )
+            except Exception as exc:
+                logger.error(
+                    f"Error fetching favorite sub-items for {jellyfin_series.get('Name', 'Unknown')} (user {user_id}): {exc}"
+                )
+                continue
+
+            if favorites or seasons:
+                return True
+
+        return False
+
+    def _build_episode_cleanup_entry(
+        self,
+        users: List[Dict[str, Any]],
+        jellyfin_series: Dict[str, Any],
+        sonarr_series: Dict[str, Any],
+        similarity_score: float,
+        min_watch_age_days: Optional[int],
+        in_qbittorrent: bool,
+    ) -> Optional[Dict[str, Any]]:
+        """Build cleanup data for watched episodes in a series"""
+        if not self.sonarr:
+            return None
+
+        jellyfin_episodes = self._collect_watched_episodes_for_series(
+            users, jellyfin_series, min_watch_age_days
+        )
+        if not jellyfin_episodes:
+            return None
+
+        try:
+            sonarr_episodes = self.sonarr.get_episodes(sonarr_series.get("id"))
+        except Exception as exc:
+            logger.error(
+                f"Error fetching Sonarr episodes for {sonarr_series.get('title', 'Unknown')}: {exc}"
+            )
+            return None
+
+        sonarr_episode_map = {}
+        for episode in sonarr_episodes:
+            key = (episode.get("seasonNumber"), episode.get("episodeNumber"))
+            sonarr_episode_map[key] = episode
+
+        matched_episodes = []
+        for episode in jellyfin_episodes:
+            season = episode.get("ParentIndexNumber")
+            number = episode.get("IndexNumber")
+            if season is None or number is None:
+                logger.debug(
+                    f"Skipping episode without season/episode numbers: {episode.get('Name', 'Unknown')}"
+                )
+                continue
+
+            sonarr_episode = sonarr_episode_map.get((season, number))
+            if not sonarr_episode:
+                logger.debug(
+                    f"No Sonarr episode match for {jellyfin_series.get('Name', 'Unknown')} S{season:02}E{number:02}"
+                )
+                continue
+
+            matched_episodes.append(
+                {
+                    "jellyfin_episode": episode,
+                    "sonarr_episode": sonarr_episode,
+                    "season_number": season,
+                    "episode_number": number,
+                }
+            )
+
+        if not matched_episodes:
+            return None
+
+        return {
+            "jellyfin_series": jellyfin_series,
+            "sonarr_series": sonarr_series,
+            "similarity_score": similarity_score,
+            "episodes": matched_episodes,
+            "in_qbittorrent": in_qbittorrent,
+        }
+
     def get_cleanup_candidates(
         self,
         min_watch_percentage: float = 0.8,
         min_watch_age_days: Optional[int] = None,
-    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        collect_episode_data: bool = False,
+    ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Get movies and series that are candidates for cleanup"""
         cleanup_movies = []
         cleanup_series = []
+        episode_cleanup = []
 
         try:
             # Get all users
@@ -186,15 +348,11 @@ class CleanupService:
 
             for user in users:
                 user_id = user["Id"]
-                watched_items = self.jellyfin.get_watched_items(
-                    user_id, ["Movie", "Series"]
-                )
+                watched_movies = self.jellyfin.get_watched_items(user_id, ["Movie"])
+                watched_series = self.jellyfin.get_watched_items(user_id, ["Series"])
 
-                for item in watched_items:
-                    if item.get("Type") == "Movie":
-                        all_watched_movies.append(item)
-                    elif item.get("Type") == "Series":
-                        all_watched_series.append(item)
+                all_watched_movies.extend(watched_movies)
+                all_watched_series.extend(watched_series)
 
             # Remove duplicates (same item watched by multiple users)
             unique_movies = {
@@ -277,9 +435,9 @@ class CleanupService:
                         )
 
             # Match with Sonarr series
+            protected_by_favorite_episodes = 0
             if self.sonarr:
                 sonarr_series = self.sonarr.get_series()
-
                 for jellyfin_show in unique_series:
                     sonarr_match = self.find_matching_series(
                         jellyfin_show, sonarr_series
@@ -297,34 +455,64 @@ class CleanupService:
                                 series_title, series_year
                             )
 
-                        cleanup_series.append(
-                            {
-                                "jellyfin_item": jellyfin_show,
-                                "sonarr_item": sonarr_match,
-                                "similarity_score": self.calculate_similarity(
-                                    series_title, sonarr_match.get("title", "")
-                                ),
-                                "fully_downloaded": (
-                                    self.sonarr.is_series_fully_watched(series_id)
-                                    if series_id
-                                    else False
-                                ),
-                                "in_qbittorrent": in_qbittorrent,
-                            }
+                        similarity = self.calculate_similarity(
+                            series_title, sonarr_match.get("title", "")
                         )
+                        has_favorite_episodes = self._series_has_favorite_content(
+                            users, jellyfin_show
+                        )
+                        series_entry = {
+                            "jellyfin_item": jellyfin_show,
+                            "sonarr_item": sonarr_match,
+                            "similarity_score": similarity,
+                            "fully_downloaded": (
+                                self.sonarr.is_series_fully_watched(series_id)
+                                if series_id
+                                else False
+                            ),
+                            "in_qbittorrent": in_qbittorrent,
+                            "favorite_episodes": has_favorite_episodes,
+                        }
+
+                        if has_favorite_episodes:
+                            protected_by_favorite_episodes += 1
+                            logger.debug(
+                                f"Skipping full series deletion for {series_title} due to favorite episodes"
+                            )
+                        else:
+                            cleanup_series.append(series_entry)
+
+                        if collect_episode_data and not in_qbittorrent:
+                            episode_entry = self._build_episode_cleanup_entry(
+                                users,
+                                jellyfin_show,
+                                sonarr_match,
+                                similarity,
+                                min_watch_age_days,
+                                in_qbittorrent,
+                            )
+                            if episode_entry:
+                                episode_cleanup.append(episode_entry)
+
+            if protected_by_favorite_episodes > 0:
+                logger.info(
+                    f"🌟 Favorite episodes protected: {protected_by_favorite_episodes} series"
+                )
 
         except Exception as e:
             logger.error(f"Error getting cleanup candidates: {e}")
 
-        return cleanup_movies, cleanup_series
+        return cleanup_movies, cleanup_series, episode_cleanup
 
     def execute_cleanup(
         self,
         movies: List[Dict[str, Any]],
         series: List[Dict[str, Any]],
+        episode_series: Optional[List[Dict[str, Any]]] = None,
         delete_files: bool = True,
         add_exclusion: bool = False,
         dry_run: bool = True,
+        delete_episodes: bool = False,
     ) -> Dict[str, Any]:
         """Execute the cleanup operation"""
         results = {
@@ -332,8 +520,71 @@ class CleanupService:
             "movies_failed": 0,
             "series_deleted": 0,
             "series_failed": 0,
+            "episodes_deleted": 0,
+            "episodes_failed": 0,
             "errors": [],
         }
+
+        # Delete individual episodes if requested
+        if delete_episodes and episode_series:
+            if not self.sonarr:
+                logger.warning(
+                    "Episode deletion requested but Sonarr client is unavailable"
+                )
+            elif not self.jellyfin:
+                logger.warning(
+                    "Episode deletion requested but Jellyfin client is unavailable"
+                )
+            else:
+                for series_entry in episode_series:
+                    jellyfin_series = series_entry.get("jellyfin_series", {})
+                    sonarr_series = series_entry.get("sonarr_series", {})
+                    series_title = jellyfin_series.get("Name", sonarr_series.get("title", "Unknown"))
+                    episodes = series_entry.get("episodes", [])
+
+                    for episode in episodes:
+                        jellyfin_episode = episode.get("jellyfin_episode", {})
+                        sonarr_episode = episode.get("sonarr_episode", {})
+                        season_number = episode.get("season_number")
+                        episode_number = episode.get("episode_number")
+
+                        season_str = (
+                            f"S{int(season_number):02d}"
+                            if isinstance(season_number, int)
+                            else "S??"
+                        )
+                        episode_str = (
+                            f"E{int(episode_number):02d}"
+                            if isinstance(episode_number, int)
+                            else "E??"
+                        )
+                        episode_label = f"{series_title} {season_str}{episode_str}"
+
+                        try:
+                            if dry_run:
+                                logger.info(
+                                    f"[DRY RUN] Would delete episode: {episode_label}"
+                                )
+                                results["episodes_deleted"] += 1
+                                continue
+
+                            self.jellyfin.delete_item(jellyfin_episode.get("Id"))
+                            unmonitored = self.sonarr.set_single_episode_monitored(
+                                sonarr_episode.get("id"), False
+                            )
+                            if not unmonitored:
+                                logger.warning(
+                                    f"Episode deleted but failed to update Sonarr monitoring: {episode_label}"
+                                )
+
+                            logger.success(f"Episode deleted: {episode_label}")
+                            results["episodes_deleted"] += 1
+
+                        except Exception as e:
+                            error_msg = f"Error deleting episode {episode_label}: {e}"
+                            logger.error(error_msg)
+                            results["errors"].append(error_msg)
+                            results["episodes_failed"] += 1
 
         # Delete movies
         if self.radarr:

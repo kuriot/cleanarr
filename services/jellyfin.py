@@ -82,6 +82,60 @@ class JellyfinClient:
         response.raise_for_status()
         return response.json().get("Items", [])
 
+    def get_watched_episodes_for_series(
+        self, user_id: str, series_id: str
+    ) -> List[Dict[str, Any]]:
+        """Get watched episodes for a specific series and user"""
+        params = {
+            "UserId": user_id,
+            "ParentId": series_id,
+            "IncludeItemTypes": "Episode",
+            "Filters": "IsPlayed",
+            "Recursive": "true",
+            "Fields": "Name,ParentIndexNumber,IndexNumber,SeasonName,Overview,RunTimeTicks,DateCreated,UserData",
+        }
+
+        url = f"{self.server_url}{self.api_base}/Items"
+        response = self.session.get(url, params=params)
+        response.raise_for_status()
+        return response.json().get("Items", [])
+
+    def get_favorite_episodes_for_series(
+        self, user_id: str, series_id: str
+    ) -> List[Dict[str, Any]]:
+        """Get favorite episodes for a specific series and user"""
+        params = {
+            "UserId": user_id,
+            "ParentId": series_id,
+            "IncludeItemTypes": "Episode",
+            "Filters": "IsFavorite",
+            "Recursive": "true",
+            "Fields": "Name,ParentIndexNumber,IndexNumber,UserData",
+        }
+
+        url = f"{self.server_url}{self.api_base}/Items"
+        response = self.session.get(url, params=params)
+        response.raise_for_status()
+        return response.json().get("Items", [])
+
+    def get_favorite_seasons_for_series(
+        self, user_id: str, series_id: str
+    ) -> List[Dict[str, Any]]:
+        """Get favorite seasons for a specific series and user"""
+        params = {
+            "UserId": user_id,
+            "ParentId": series_id,
+            "IncludeItemTypes": "Season",
+            "Filters": "IsFavorite",
+            "Recursive": "false",
+            "Fields": "Name,IndexNumber,UserData",
+        }
+
+        url = f"{self.server_url}{self.api_base}/Items"
+        response = self.session.get(url, params=params)
+        response.raise_for_status()
+        return response.json().get("Items", [])
+
     def format_runtime(self, runtime_ticks: int) -> str:
         """Convert runtime ticks to human readable format"""
         if not runtime_ticks:
@@ -141,3 +195,10 @@ class JellyfinClient:
         response = self.session.get(url, params=params)
         response.raise_for_status()
         return response.json().get("Items", [])
+
+    def delete_item(self, item_id: str) -> bool:
+        """Delete a media item (and its files)"""
+        url = f"{self.server_url}{self.api_base}/Items/{item_id}"
+        response = self.session.delete(url)
+        response.raise_for_status()
+        return response.status_code in (200, 204)

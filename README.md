@@ -29,6 +29,7 @@ Cleanarr automatically identifies and removes watched movies and TV series from 
 - **Auto-configuration** - Creates example config on first run
 - **Multiple Auth Methods** - API keys + HTTP Basic Auth support
 - **Granular Control** - Movies-only, series-only, similarity thresholds
+- **Episode Cleanup** - Optional flag to prune watched episodes without deleting a whole series
 - **Comprehensive Logging** - Debug info to file, clean output to console
 
 ## 🚀 Quick Start
@@ -96,6 +97,9 @@ python run.py --series-only
 # Keep files but remove from Radarr/Sonarr
 python run.py --delete --keep-files
 
+# Delete watched episodes but keep the rest of the series
+python run.py --delete --delete-episodes
+
 # Custom similarity threshold
 python run.py --similarity-threshold 0.9
 ```
@@ -161,6 +165,7 @@ python run.py --similarity-threshold 0.9
 | `--keep-files` | Remove from *arr but keep files on disk | `false` |
 | `--movies-only` | Process only movies | `false` |
 | `--series-only` | Process only TV series | `false` |
+| `--delete-episodes` | Remove watched episodes individually when possible | `false` |
 | `--watched-before-days` | Only delete items watched at least N days ago | `unset` |
 | `--similarity-threshold` | Minimum match confidence (0.0-1.0) | `0.8` |
 | `--log-level` | Logging verbosity (DEBUG/INFO/WARNING/ERROR) | `INFO` |

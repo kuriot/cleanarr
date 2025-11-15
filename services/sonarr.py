@@ -87,6 +87,24 @@ class SonarrClient:
         response.raise_for_status()
         return response.json()
 
+    def set_episode_monitored_state(
+        self, episode_ids: List[int], monitored: bool
+    ) -> bool:
+        """Set monitored state for the given episodes"""
+        if not episode_ids:
+            return True
+
+        url = f"{self.server_url}/api/v3/episode/monitor"
+        payload = {"episodeIds": episode_ids, "monitored": monitored}
+
+        response = self.session.put(url, json=payload)
+        response.raise_for_status()
+        return response.status_code in [200, 202]
+
+    def set_single_episode_monitored(self, episode_id: int, monitored: bool) -> bool:
+        """Convenience helper to set a single episode monitored state"""
+        return self.set_episode_monitored_state([episode_id], monitored)
+
     def get_episode_files(self, series_id: int) -> List[Dict[str, Any]]:
         """Get episode files for a specific series"""
         url = f"{self.server_url}/api/v3/episodefile"
